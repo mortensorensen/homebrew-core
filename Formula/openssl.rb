@@ -20,6 +20,7 @@ class Openssl < Formula
     "Apple has deprecated use of OpenSSL in favor of its own TLS and crypto libraries"
 
   option "without-test", "Skip build-time tests (not recommended)"
+  option :universal
 
   deprecated_option "without-check" => "without-test"
 
@@ -57,19 +58,59 @@ class Openssl < Formula
               'zlib_dso = DSO_load(NULL, "z", NULL, 0);',
               'zlib_dso = DSO_load(NULL, "/usr/lib/libz.dylib", NULL, DSO_FLAG_NO_NAME_TRANSLATION);'
 
-    if MacOS.prefer_64_bit?
-      arch = Hardware::CPU.arch_64_bit
+    if build.universal?
+      ENV.permit_arch_flags
+      archs = Hardware::CPU.universal_archs
     else
-      arch = Hardware::CPU.arch_32_bit
+      archs = [MacOS.prefer_64_bit? ? Hardware::CPU.arch_64_bit : Hardware::CPU.arch_32_bit]
     end
 
-    ENV.deparallelize
-    system "perl", "./Configure", *(configure_args + arch_args[arch])
-    system "make", "depend"
-    system "make"
-    system "make", "test" if build.with?("test")
+    dirs = []
+
+    archs.each do |arch|
+      if build.universal?
+        dir = "build-#{arch}"
+        dirs << dir
+        mkdir dir
+        mkdir "#{dir}/engines"
+        system "make", "clean"
+      end
+
+      ENV.deparallelize
+      system "perl", "./Configure", *(configure_args + arch_args[arch])
+      system "make", "depend"
+      system "make"
+      system "make", "test" if build.with?("test")
+
+      if build.universal?
+        cp Dir["*.?.?.?.dylib", "*.a", "apps/openssl"], dir
+        cp Dir["engines/**/*.dylib"], "#{dir}/engines"
+      end
+    end
 
     system "make", "install", "MANDIR=#{man}", "MANSUFFIX=ssl"
+
+    if build.universal?
+      %w[libcrypto libssl].each do |libname|
+        system "lipo", "-create", "#{dirs.first}/#{libname}.1.0.0.dylib",
+                                  "#{dirs.last}/#{libname}.1.0.0.dylib",
+                       "-output", "#{lib}/#{libname}.1.0.0.dylib"
+        system "lipo", "-create", "#{dirs.first}/#{libname}.a",
+                                  "#{dirs.last}/#{libname}.a",
+                       "-output", "#{lib}/#{libname}.a"
+      end
+
+      Dir.glob("#{dirs.first}/engines/*.dylib") do |engine|
+        libname = File.basename(engine)
+        system "lipo", "-create", "#{dirs.first}/engines/#{libname}",
+                                  "#{dirs.last}/engines/#{libname}",
+                       "-output", "#{lib}/engines/#{libname}"
+      end
+
+      system "lipo", "-create", "#{dirs.first}/openssl",
+                                "#{dirs.last}/openssl",
+                     "-output", "#{bin}/openssl"
+    end
   end
 
   def openssldir
